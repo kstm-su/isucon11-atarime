@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,7 +18,6 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
-	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
@@ -185,6 +183,10 @@ type JIAServiceRequest struct {
 var isuTimestamp sync.Map
 var MapQueue map[string][]PostIsu
 
+var IsuLock sync.RWMutex
+var IsuCache map[string][]Isu
+var IsuIndex map[string]int
+
 
 
 func getEnv(key string, defaultValue string) string {
@@ -197,7 +199,7 @@ func getEnv(key string, defaultValue string) string {
 
 func NewMySQLConnectionEnv() *MySQLConnectionEnv {
 	return &MySQLConnectionEnv{
-		Host:     getEnv("MYSQL_HOST", "127.0.0.1"),
+		Host:     getEnv("MYSQL_HOST", "54.250.59.97"),
 		Port:     getEnv("MYSQL_PORT", "3306"),
 		User:     getEnv("MYSQL_USER", "isucon"),
 		DBName:   getEnv("MYSQL_DBNAME", "isucondition"),
@@ -348,6 +350,15 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	//Isu のキャッシュを初期化
+	isuList := []Isu{}
+	err = db.Select(&isuList,"SELECT * FROM `isu`")
+	for _, data := range isuList {
+		IsuCache[data.JIAUserID] = append(IsuCache[data.JIAUserID], data)
+	}
+
+
+
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -477,17 +488,13 @@ func getIsuList(c echo.Context) error {
 	defer tx.Rollback()
 
 	isuList := []Isu{}
-	err = tx.Select(
-		&isuList,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
-		jiaUserID)
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	IsuLock.Lock()
+	isuList = IsuCache[jiaUserID]
+	IsuLock.Unlock()
 
 	responseList := []GetIsuListResponse{}
-	for _, isu := range isuList {
+	for i := 0; i<len(isuList); i+=1 {
+		isu := isuList[len(IsuCache) - i - 1]
 		var lastCondition IsuCondition
 		foundLastCondition := true
 
@@ -590,19 +597,24 @@ func postIsu(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
+	
 	_, err = tx.Exec("INSERT INTO `isu`"+
 		"	(`jia_isu_uuid`, `name`, `image`, `jia_user_id`) VALUES (?, ?, ?, ?)",
 		jiaIsuUUID, isuName, image, jiaUserID)
 	if err != nil {
+		/*
 		mysqlErr, ok := err.(*mysql.MySQLError)
 
 		if ok && mysqlErr.Number == uint16(mysqlErrNumDuplicateEntry) {
 			return c.String(http.StatusConflict, "duplicated: isu")
 		}
+		*/
 
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	
+
 
 	targetURL := getJIAServiceURL(tx) + "/api/activate"
 	body := JIAServiceRequest{postIsuConditionTargetBaseURL, jiaIsuUUID}
@@ -644,12 +656,21 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	
 	_, err = tx.Exec("UPDATE `isu` SET `character` = ? WHERE  `jia_isu_uuid` = ?", isuFromJIA.Character, jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	
 
+	IsuLock.RLock()
+	IsuCache[jiaUserID] = append(IsuCache[jiaUserID], Isu{ID: 1, JIAIsuUUID: jiaIsuUUID, Name: isuName, Image: image, Character: isuFromJIA.Character, JIAUserID: jiaUserID, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+	isu := IsuCache[jiaUserID][len(IsuCache) -1]
+	IsuIndex[jiaUserID + jiaIsuUUID] = len(IsuCache) - 1
+	IsuLock.RUnlock()
+
+	/*
 	var isu Isu
 	err = tx.Get(
 		&isu,
@@ -659,6 +680,8 @@ func postIsu(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	*/
+
 
 	err = tx.Commit()
 	if err != nil {
@@ -685,6 +708,7 @@ func getIsuID(c echo.Context) error {
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
 	var res Isu
+	/*
 	err = db.Get(&res, "SELECT * FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
 		jiaUserID, jiaIsuUUID)
 	if err != nil {
@@ -695,6 +719,8 @@ func getIsuID(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	*/
+	res = IsuCache[jiaUserID][IsuIndex[jiaUserID + jiaIsuUUID]];
 
 	return c.JSON(http.StatusOK, res)
 }
@@ -714,7 +740,9 @@ func getIsuIcon(c echo.Context) error {
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
+
 	var image []byte
+	/*
 	err = db.Get(&image, "SELECT `image` FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
 		jiaUserID, jiaIsuUUID)
 	if err != nil {
@@ -725,6 +753,9 @@ func getIsuIcon(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	*/
+
+	image = IsuCache[jiaUserID][IsuIndex[jiaUserID + jiaIsuUUID]].Image
 
 	return c.Blob(http.StatusOK, "", image)
 }
@@ -760,14 +791,20 @@ func getIsuGraph(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var count int
+	//var count bool = true
+	/*
 	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ? limit 1",
 		jiaUserID, jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	if count == 0 {
+	*/
+
+
+	_, count := IsuIndex[jiaUserID + jiaIsuUUID]
+	
+	if count == false {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
@@ -992,7 +1029,8 @@ func getIsuConditions(c echo.Context) error {
 		startTime = time.Unix(startTimeInt64, 0)
 	}
 
-	var isuName string
+	//var isuName string
+	/*
 	err = db.Get(&isuName,
 		"SELECT name FROM `isu` WHERE `jia_isu_uuid` = ? AND `jia_user_id` = ?",
 		jiaIsuUUID, jiaUserID,
@@ -1005,6 +1043,16 @@ func getIsuConditions(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	*/
+
+	var isuName string
+	index, exist := IsuIndex[jiaUserID + jiaIsuUUID]
+	if exist {
+		isuName = IsuCache[jiaUserID][index].Name
+	} else {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
 
 	conditionsResponse, err := getIsuConditionsFromDB(db, jiaIsuUUID, endTime, conditionLevel, startTime, conditionLimit, isuName)
 	if err != nil {
@@ -1173,11 +1221,13 @@ func getTrend(c echo.Context) error {
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
+	/*
 	dropProbability := 0.5
 	if rand.Float64() <= dropProbability {
 		c.Logger().Warnf("drop post isu condition request")
 		return c.NoContent(http.StatusAccepted)
 	}
+	*/
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	if jiaIsuUUID == "" {
@@ -1229,7 +1279,7 @@ func postIsuCondition(c echo.Context) error {
 
 	MapQueue[jiaIsuUUID] = append(MapQueue[jiaIsuUUID], insReq...)
 
-	if(len(MapQueue[jiaIsuUUID]) < 100){
+	if(len(MapQueue[jiaIsuUUID]) < 500){
 		return c.NoContent(http.StatusAccepted)
 	}
 
