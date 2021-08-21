@@ -179,12 +179,13 @@ type JIAServiceRequest struct {
 	IsuUUID       string `json:"isu_uuid"`
 }
 
-//Lock
-//var isuTimestamp sync.RWMutex
 
+
+//Lock, Cache
 var isuTimestamp sync.Map
+var MapQueue map[string][]PostIsu
 
-// cache
+
 
 func getEnv(key string, defaultValue string) string {
 	val := os.Getenv(key)
@@ -1172,7 +1173,7 @@ func getTrend(c echo.Context) error {
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-	dropProbability := 0.8
+	dropProbability := 0.5
 	if rand.Float64() <= dropProbability {
 		c.Logger().Warnf("drop post isu condition request")
 		return c.NoContent(http.StatusAccepted)
@@ -1217,35 +1218,30 @@ func postIsuCondition(c echo.Context) error {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
-		// _, err = tx.Exec(
-		// 	"INSERT INTO `isu_condition`"+
-		// 		"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
-		// 		"	VALUES (?, ?, ?, ?, ?)",
-		// 	jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
-		// if err != nil {
-		// 	c.Logger().Errorf("db error: %v", err)
-		// 	return c.NoContent(http.StatusInternalServerError)
-		// }
-
 		insReq[i] = PostIsu{
 			IsSitting: cond.IsSitting,
 			Condition: cond.Condition,
 			Message:   cond.Message,
 			Timestamp: timestamp,
 			UUID:      jiaIsuUUID,
-		}
+		}		
+	}
 
-		
+	MapQueue[jiaIsuUUID] = append(MapQueue[jiaIsuUUID], insReq...)
+
+	if(len(MapQueue[jiaIsuUUID]) < 100){
+		return c.NoContent(http.StatusAccepted)
 	}
 
 	_, errDb := tx.NamedExec("INSERT INTO `isu_condition`"+
 		"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
-		"	VALUES (:jia_isu_uuid, :timestamp, :is_sitting, :condition, :message)", insReq)
-
+		"	VALUES (:jia_isu_uuid, :timestamp, :is_sitting, :condition, :message)", MapQueue[jiaIsuUUID])
 	if errDb != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	MapQueue[jiaIsuUUID] = []PostIsu{}
 
 	// 最新のコンディションを保持するためのキャッシュを更新.
 	var data IsuCondition
