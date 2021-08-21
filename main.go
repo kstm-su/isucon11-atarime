@@ -171,6 +171,14 @@ type JIAServiceRequest struct {
 	IsuUUID       string `json:"isu_uuid"`
 }
 
+type Bulkinsert struct {
+	JIAIsuUUID string    `db:"jia_isu_uuid"`
+	Timestamp  time.Time `db:"timestamp"`
+	IsSitting  bool      `db:"is_sitting"`
+	Condition  string    `db:"condition"`
+	Message    string    `db:"message"`
+}
+
 //Lock
 //var isuTimestamp sync.RWMutex
 
@@ -1203,13 +1211,24 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
-	for _, cond := range req {
+
+	// use Count!!!
+	for i, cond := range req {
 		timestamp := time.Unix(cond.Timestamp, 0)
 
 		if !isValidConditionFormat(cond.Condition) {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
+		query := "INSERT INTO `isu_condition`"+
+		"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
+		"	VALUES (:jia_isu_uuid, :timestamp, :is_sitting, :condition, :message)"
+		cond_tmp := req[i]
+		timestamp_tmp := time.Unix(cond_tmp.Timestamp, 0)
+		tx.NamedExec(query, &Bulkinsert{JIAIsuUUID: jiaIsuUUID, Timestamp: timestamp_tmp, IsSitting: cond_tmp.IsSitting, Condition: cond_tmp.Condition, Message: cond_tmp.Condition})
+
+
+		/*
 		_, err = tx.Exec(
 			"INSERT INTO `isu_condition`"+
 				"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
@@ -1219,6 +1238,8 @@ func postIsuCondition(c echo.Context) error {
 			c.Logger().Errorf("db error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
+		*/
+
 
 		// 最新のコンディションを保持するためのキャッシュを更新.
 		var data IsuCondition
