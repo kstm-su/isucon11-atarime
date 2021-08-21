@@ -1235,16 +1235,7 @@ func postIsuCondition(c echo.Context) error {
 			UUID:      jiaIsuUUID,
 		}
 
-		// 最新のコンディションを保持するためのキャッシュを更新.
-		var data IsuCondition
-		data.ID = 1
-		data.JIAIsuUUID = jiaIsuUUID
-		data.Timestamp = timestamp
-		data.IsSitting = cond.IsSitting
-		data.Condition = cond.Condition
-		data.Message = cond.Message
-		data.CreatedAt = timestamp
-		isuTimestamp.Store(jiaIsuUUID, data)
+		
 	}
 
 	_, errDb := tx.NamedExec("INSERT INTO `isu_condition`"+
@@ -1255,6 +1246,17 @@ func postIsuCondition(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	// 最新のコンディションを保持するためのキャッシュを更新.
+	var data IsuCondition
+	data.ID = 1
+	data.JIAIsuUUID = jiaIsuUUID
+	data.Timestamp = insReq[len(insReq) - 1].Timestamp
+	data.IsSitting = insReq[len(insReq) - 1].IsSitting
+	data.Condition = insReq[len(insReq) - 1].Condition
+	data.Message = insReq[len(insReq) - 1].Message
+	data.CreatedAt = insReq[len(insReq) - 1].Timestamp
+	isuTimestamp.Store(jiaIsuUUID, data)
 
 	err = tx.Commit()
 	if err != nil {
